@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MARAUDER OS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background-color: #001100; color: #00FF00; font-family: 'Courier New', monospace; margin: 0; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    h1 { text-shadow: 0 0 10px #00FF00; letter-spacing: 3px; margin-top: 20px; font-size: 20px; }
+    
+    /* RADAR SECTION */
+    #radar-container { position: relative; width: 300px; height: 300px; border-radius: 50%; border: 2px solid #004400; background: radial-gradient(circle, #001100 0%, #002200 100%); box-shadow: 0 0 20px #00FF00 inset; margin: 20px 0; }
+    #scanner { position: absolute; top: 50%; left: 50%; width: 50%; height: 2px; background: linear-gradient(90deg, transparent 0%, #00FF00 100%); transform-origin: 0 0; animation: scan 3s infinite linear; box-shadow: 0 0 10px #00FF00; }
+    .blip { position: absolute; width: 8px; height: 8px; background-color: #00FF00; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 8px #00FF00; }
+    .grid { position: absolute; border: 1px solid #004400; border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+    .g1 { width: 33%; height: 33%; } .g2 { width: 66%; height: 66%; }
+    
+    /* DATA TABLE SECTION */
+    .terminal-window { width: 90%; max-width: 600px; border: 1px solid #004400; background: #000500; padding: 10px; box-shadow: 0 0 15px rgba(0, 255, 0, 0.1); margin-bottom: 30px; }
+    .term-header { border-bottom: 1px solid #004400; padding-bottom: 5px; margin-bottom: 10px; font-weight: bold; display: flex; justify-content: space-between; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; border-bottom: 1px dashed #004400; padding: 5px; color: #008800; }
+    td { padding: 5px; border-bottom: 1px solid #002200; }
+    tr:hover { background-color: #002200; }
+    .rssi-strong { color: #fff; font-weight: bold; }
+    .rssi-med { color: #00ff00; }
+    .rssi-weak { color: #005500; }
+
+    @keyframes scan { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+  <h1>MARAUDER V2</h1>
+  
+  <div id="radar-container">
+    <div class="grid g1"></div>
+    <div class="grid g2"></div>
+    <div id="scanner"></div>
+  </div>
+
+  <div class="terminal-window">
+    <div class="term-header">
+      <span>> TARGET_MANIFEST</span>
+      <span id="count">0 DEVICES</span>
+    </div>
+    <table id="deviceTable">
+      <thead>
+        <tr>
+          <th>MAC ADDRESS</th>
+          <th>RSSI</th>
+          <th>NAME</th>
+        </tr>
+      </thead>
+      <tbody>
+        </tbody>
+    </table>
+  </div>
+
+  <script>
+    const radar = document.getElementById('radar-container');
+    const tableBody = document.querySelector('#deviceTable tbody');
+    const countLabel = document.getElementById('count');
+    const center = 150; // Half of 300px
+
+    function updateData() {
+      fetch('/api/scan')
+        .then(res => res.json())
+        .then(devices => {
+          // 1. Update Radar Blips
+          document.querySelectorAll('.blip').forEach(e => e.remove());
+          
+          // 2. Update Table
+          tableBody.innerHTML = '';
+          countLabel.innerText = `${devices.length} DEVICES`;
+
+          devices.forEach(d => {
+            // -- Radar Math --
+            let rssi = Math.max(-100, Math.min(d.rssi, -30));
+            let dist = ((-30 - rssi) / 70) * (center - 10); 
+            let angle = Math.random() * 6.28;
+            let x = center + dist * Math.cos(angle);
+            let y = center + dist * Math.sin(angle);
+            
+            let blip = document.createElement('div');
+            blip.className = 'blip';
+            blip.style.left = x + 'px';
+            blip.style.top = y + 'px';
+            radar.appendChild(blip);
+
+            // -- Table Row --
+            let row = `<tr>
+              <td>${d.addr}</td>
+              <td class="${d.rssi > -60 ? 'rssi-strong' : (d.rssi > -80 ? 'rssi-med' : 'rssi-weak')}">${d.rssi} dBm</td>
+              <td>${d.name}</td>
+            </tr>`;
+            tableBody.innerHTML += row;
+          });
+        });
+    }
+    setInterval(updateData, 4000); // Refresh every 4s
+  </script>
+
+</body>
+</html>
