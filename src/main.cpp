@@ -12,8 +12,8 @@
 #include <HTTPClient.h>
 
 // ================= CONFIGURATION =================
-const char* HOME_SSID = "wifi name";      // <--- CHANGE THIS
-const char* HOME_PASS = "password";  // <--- CHANGE THIS
+const char* HOME_SSID = "";      // <--- CHANGE THIS
+const char* HOME_PASS = "";  // <--- CHANGE THIS
 String GOOGLE_SCRIPT_ID = ""; 
 // =================================================
 
@@ -99,7 +99,6 @@ void handleRoot() {
 }
 
 void performScan() {
-  // Scan for 3 seconds
   BLEScanResults found = pBLEScan->start(3, false); 
   deviceCount = found.getCount();
   
@@ -107,45 +106,39 @@ void performScan() {
   for (int i = 0; i < deviceCount; i++) {
     BLEAdvertisedDevice d = found.getDevice(i);
     JsonObject obj = doc.add<JsonObject>();
-    obj["addr"] = d.getAddress().toString();
+    String addr = d.getAddress().toString().c_str(); // Get MAC like "24:6f:28..."
+    
+    obj["addr"] = addr;
     obj["rssi"] = d.getRSSI();
     
-    // --- THE DETECTIVE LOGIC ---
     String finalName = "-";
     
-    // 1. Try to get the real name
+    // PRIORITY 1: Real Name
     if (d.haveName()) {
       finalName = d.getName().c_str();
     } 
-    // 2. If no name, check Manufacturer Data (The Fingerprint)
+    // PRIORITY 2: Manufacturer Data (The Internal ID)
     else if (d.haveManufacturerData()) {
       std::string data = d.getManufacturerData();
       if (data.length() >= 2) {
-        // Check the Hex ID (Little Endian)
-        // Apple ID: 0x004C
-        if (data[0] == 0x4C && data[1] == 0x00) {
-          finalName = "Apple Device (iPhone/Watch)";
-        }
-        // Microsoft ID: 0x0006
-        else if (data[0] == 0x06 && data[1] == 0x00) {
-          finalName = "Microsoft Device";
-        }
-        // Samsung ID: 0x0075
-        else if (data[0] == 0x75 && data[1] == 0x00) {
-          finalName = "Samsung Device";
-        }
-        // Sony ID: 0x002D
-        else if (data[0] == 0x2D && data[1] == 0x00) {
-           finalName = "Sony Device";
-        }
-        // Google ID: 0x00E0
-        else if (data[0] == 0xE0 && data[1] == 0x00) {
-           finalName = "Google Device";
-        }
-        else {
-           finalName = "Unknown Gadget";
-        }
+        if (data[0] == 0x4C && data[1] == 0x00) finalName = "Apple Device";
+        else if (data[0] == 0x06 && data[1] == 0x00) finalName = "Microsoft Device";
+        else if (data[0] == 0x75 && data[1] == 0x00) finalName = "Samsung Device";
+        else if (data[0] == 0xE0 && data[1] == 0x00) finalName = "Google Device";
+        else finalName = "Unknown Smart Device";
       }
+    }
+    // PRIORITY 3: MAC Address Vendor Lookup (The Fallback)
+    // We check the start of the MAC address for known tech giants
+    else {
+      // Note: MAC addresses are lowercase in the library
+      if (addr.startsWith("24:6f:28") || addr.startsWith("cc:50:e3")) finalName = "Espressif (IoT)";
+      else if (addr.startsWith("ac:bc:32") || addr.startsWith("f0:98:9d")) finalName = "Apple Inc";
+      else if (addr.startsWith("44:01:bb") || addr.startsWith("94:b8:6d")) finalName = "JBL Audio";
+      else if (addr.startsWith("94:db:56") || addr.startsWith("b8:27:eb")) finalName = "Sony";
+      else if (addr.startsWith("88:c6:26")) finalName = "Bose";
+      else if (addr.startsWith("f4:f5:db")) finalName = "Fitbit";
+      else if (addr.startsWith("c4:30:18")) finalName = "Qualcomm (Android)";
     }
     
     obj["name"] = finalName;
