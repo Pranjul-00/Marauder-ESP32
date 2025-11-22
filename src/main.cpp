@@ -99,6 +99,7 @@ void handleRoot() {
 }
 
 void performScan() {
+  // Scan for 3 seconds
   BLEScanResults found = pBLEScan->start(3, false); 
   deviceCount = found.getCount();
   
@@ -108,7 +109,46 @@ void performScan() {
     JsonObject obj = doc.add<JsonObject>();
     obj["addr"] = d.getAddress().toString();
     obj["rssi"] = d.getRSSI();
-    obj["name"] = d.haveName() ? d.getName() : "-";
+    
+    // --- THE DETECTIVE LOGIC ---
+    String finalName = "-";
+    
+    // 1. Try to get the real name
+    if (d.haveName()) {
+      finalName = d.getName().c_str();
+    } 
+    // 2. If no name, check Manufacturer Data (The Fingerprint)
+    else if (d.haveManufacturerData()) {
+      std::string data = d.getManufacturerData();
+      if (data.length() >= 2) {
+        // Check the Hex ID (Little Endian)
+        // Apple ID: 0x004C
+        if (data[0] == 0x4C && data[1] == 0x00) {
+          finalName = "Apple Device (iPhone/Watch)";
+        }
+        // Microsoft ID: 0x0006
+        else if (data[0] == 0x06 && data[1] == 0x00) {
+          finalName = "Microsoft Device";
+        }
+        // Samsung ID: 0x0075
+        else if (data[0] == 0x75 && data[1] == 0x00) {
+          finalName = "Samsung Device";
+        }
+        // Sony ID: 0x002D
+        else if (data[0] == 0x2D && data[1] == 0x00) {
+           finalName = "Sony Device";
+        }
+        // Google ID: 0x00E0
+        else if (data[0] == 0xE0 && data[1] == 0x00) {
+           finalName = "Google Device";
+        }
+        else {
+           finalName = "Unknown Gadget";
+        }
+      }
+    }
+    
+    obj["name"] = finalName;
   }
   
   jsonDevices = "";
