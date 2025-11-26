@@ -1,15 +1,16 @@
-// run at 192.168.4.1
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+
+// --- DUAL BLUETOOTH LIBRARIES ---
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
-#include <ArduinoJson.h>
-#include <HTTPClient.h>
+#include <BluetoothSerial.h>
 
 // ================= CONFIGURATION =================
 const char* HOME_SSID = "";      // <--- CHANGE THIS
@@ -17,22 +18,27 @@ const char* HOME_PASS = "";  // <--- CHANGE THIS
 String GOOGLE_SCRIPT_ID = ""; 
 // =================================================
 
-const char* marauder_ssid = "Marauder Radar";
 WebServer server(80);
 BLEScan* pBLEScan;
-String jsonDevices = "[]"; 
-int deviceCount = 0;
-unsigned long lastScanTime = 0;
+BluetoothSerial SerialBT;
+
+// Data Storage
+JsonDocument bleDoc;
+JsonDocument classicDoc;
+String finalJson = "[]"; 
+
+unsigned long lastBleScan = 0;
+unsigned long lastClassicScan = 0;
 unsigned long lastLogTime = 0;
 
-// --- 1. SYNC LOGIC (Runs cleanly after a reboot) ---
-void performSync() {
-  Serial.println("\n[MODE] SYNC MODE STARTED (BLE Disabled for max memory)");
+// --- 1. SYNC LOGIC (The Upload Function) ---
+void performSyncMode() {
+  Serial.println("\n[MODE] SYNC MODE STARTED");
   
-  // Connect to WiFi
   WiFi.mode(WIFI_STA);
-  // Universal DNS Fix
+  // DNS Fix
   WiFi.config(IPAddress(0,0,0,0), IPAddress(0,0,0,0), IPAddress(0,0,0,0), IPAddress(8,8,8,8), IPAddress(8,8,4,4));
+  
   WiFi.begin(HOME_SSID, HOME_PASS);
   
   Serial.print("[SYNC] Connecting to Home WiFi");
@@ -48,6 +54,7 @@ void performSync() {
         String line = f.readStringUntil('\n');
         if (line.length() < 5) continue;
 
+        // Re-package the saved data for Google
         JsonDocument savedDoc;
         deserializeJson(savedDoc, line);
         
@@ -60,14 +67,14 @@ void performSync() {
 
         HTTPClient http;
         String url = "https://script.google.com/macros/s/" + GOOGLE_SCRIPT_ID + "/exec";
-        
-        // Now we have plenty of RAM for HTTPS!
         http.begin(url.c_str());
         http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
         http.addHeader("Content-Type", "application/json");
 
         int code = http.POST(payload);
-        Serial.printf("[SYNC] Uploaded snapshot: %d\n", code);
+        if (code > 0) Serial.printf("[SYNC] Uploaded: %d\n", code);
+        else Serial.printf("[SYNC] Failed: %s\n", http.errorToString(code).c_str());
+        
         http.end();
       }
       f.close();
@@ -77,20 +84,99 @@ void performSync() {
       Serial.println("[SYNC] No logs found.");
     }
   } else {
-    Serial.println("\n[SYNC] WiFi Failed.");
+    Serial.println("\n[SYNC] WiFi Connection Failed.");
   }
-
-  // Remove the sync flag so next boot is normal
+  
+  // Delete flag and restart to Radar Mode
   LittleFS.remove("/do_sync");
-  Serial.println("[SYNC] Done. Restarting to Radar Mode...");
-  delay(2000);
+  Serial.println("[SYNC] Restarting to Radar...");
+  delay(1000);
   ESP.restart();
 }
 
-// --- 2. RADAR LOGIC (Normal Operation) ---
+// --- 2. SCANNING LOGIC ---
 class MyCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice d) {} 
 };
+
+void scanBLE() {
+  // Fast scan (2 seconds)
+  BLEScanResults found = pBLEScan->start(2, false); 
+  bleDoc.clear();
+  
+  for (int i = 0; i < found.getCount(); i++) {
+    BLEAdvertisedDevice d = found.getDevice(i);
+    JsonObject obj = bleDoc.add<JsonObject>();
+    
+    obj["addr"] = d.getAddress().toString().c_str();
+    obj["rssi"] = d.getRSSI();
+    obj["type"] = "BLE"; 
+    
+    String name = "-";
+    if (d.haveName()) name = d.getName().c_str();
+    else if (d.haveManufacturerData()) {
+       std::string md = d.getManufacturerData();
+       if (md.length()>=2 && md[0]==0x4C) name = "Apple Device";
+       else if (md.length()>=2 && md[0]==0x06) name = "Microsoft Device";
+       else if (md.length()>=2 && md[0]==0x75) name = "Samsung Device";
+    }
+    obj["name"] = name;
+  }
+  pBLEScan->clearResults();
+}
+
+void scanClassic() {
+  Serial.println("[RADAR] Deep Scan (Classic) started...");
+  // Freezes for 8-10 seconds
+  BTScanResults *pResults = SerialBT.discover(8000); 
+  
+  classicDoc.clear();
+  if (pResults) {
+    for (int i = 0; i < pResults->getCount(); i++) {
+      BTAdvertisedDevice* d = pResults->getDevice(i);
+      JsonObject obj = classicDoc.add<JsonObject>();
+      
+      obj["addr"] = d->getAddress().toString().c_str();
+      obj["rssi"] = d->getRSSI();
+      obj["type"] = "CL"; // Classic Tag
+      
+      String name = d->getName().c_str();
+      if (name.length() == 0) name = "Unknown Classic Device";
+      obj["name"] = name;
+    }
+  }
+  Serial.println("[RADAR] Deep Scan Complete.");
+}
+
+void updateWebData() {
+  JsonDocument merged;
+  for (JsonVariant v : bleDoc.as<JsonArray>()) merged.add(v);
+  for (JsonVariant v : classicDoc.as<JsonArray>()) merged.add(v);
+  
+  finalJson = "";
+  serializeJson(merged, finalJson);
+}
+
+void triggerSync() {
+    Serial.println("Sync Requested. Rebooting...");
+    
+    // Save current state before reboot
+    File f = LittleFS.open("/log.txt", "a");
+    String line;
+    JsonDocument wrap;
+    wrap["count"] = bleDoc.size() + classicDoc.size();
+    wrap["data"] = finalJson;
+    serializeJson(wrap, line);
+    f.println(line);
+    f.close();
+    
+    // Set flag
+    File flag = LittleFS.open("/do_sync", "w");
+    flag.print("1");
+    flag.close();
+    delay(200);
+    ESP.restart();
+}
 
 void handleRoot() {
   File f = LittleFS.open("/index.html", "r");
@@ -98,125 +184,69 @@ void handleRoot() {
   else server.send(404, "text/plain", "Radar UI Missing");
 }
 
-void performScan() {
-  BLEScanResults found = pBLEScan->start(3, false); 
-  deviceCount = found.getCount();
-  
-  JsonDocument doc;
-  for (int i = 0; i < deviceCount; i++) {
-    BLEAdvertisedDevice d = found.getDevice(i);
-    JsonObject obj = doc.add<JsonObject>();
-    String addr = d.getAddress().toString().c_str(); // Get MAC like "24:6f:28..."
-    
-    obj["addr"] = addr;
-    obj["rssi"] = d.getRSSI();
-    
-    String finalName = "-";
-    
-    // PRIORITY 1: Real Name
-    if (d.haveName()) {
-      finalName = d.getName().c_str();
-    } 
-    // PRIORITY 2: Manufacturer Data (The Internal ID)
-    else if (d.haveManufacturerData()) {
-      std::string data = d.getManufacturerData();
-      if (data.length() >= 2) {
-        if (data[0] == 0x4C && data[1] == 0x00) finalName = "Apple Device";
-        else if (data[0] == 0x06 && data[1] == 0x00) finalName = "Microsoft Device";
-        else if (data[0] == 0x75 && data[1] == 0x00) finalName = "Samsung Device";
-        else if (data[0] == 0xE0 && data[1] == 0x00) finalName = "Google Device";
-        else finalName = "Unknown Smart Device";
-      }
-    }
-    // PRIORITY 3: MAC Address Vendor Lookup (The Fallback)
-    // We check the start of the MAC address for known tech giants
-    else {
-      // Note: MAC addresses are lowercase in the library
-      if (addr.startsWith("24:6f:28") || addr.startsWith("cc:50:e3")) finalName = "Espressif (IoT)";
-      else if (addr.startsWith("ac:bc:32") || addr.startsWith("f0:98:9d")) finalName = "Apple Inc";
-      else if (addr.startsWith("44:01:bb") || addr.startsWith("94:b8:6d")) finalName = "JBL Audio";
-      else if (addr.startsWith("94:db:56") || addr.startsWith("b8:27:eb")) finalName = "Sony";
-      else if (addr.startsWith("88:c6:26")) finalName = "Bose";
-      else if (addr.startsWith("f4:f5:db")) finalName = "Fitbit";
-      else if (addr.startsWith("c4:30:18")) finalName = "Qualcomm (Android)";
-    }
-    
-    obj["name"] = finalName;
-  }
-  
-  jsonDevices = "";
-  serializeJson(doc, jsonDevices);
-  pBLEScan->clearResults(); 
-}
-
-void logToMemory() {
-  Serial.println("[LOG] Saving snapshot...");
-  File f = LittleFS.open("/log.txt", "a");
-  if (!f) return;
-
-  JsonDocument doc;
-  doc["count"] = deviceCount;
-  doc["data"] = jsonDevices;
-  String line;
-  serializeJson(doc, line);
-  f.println(line);
-  f.close();
-}
-
-void triggerSyncRestart() {
-  Serial.println("[CMD] Sync requested. Flagging and Rebooting...");
-  // Create the flag file
-  File f = LittleFS.open("/do_sync", "w");
-  f.print("1");
-  f.close();
-  delay(500);
-  ESP.restart(); // Reboot immediately
-}
-
-// --- SETUP ---
 void setup() {
   Serial.begin(115200);
   LittleFS.begin(true);
   pinMode(0, INPUT_PULLUP);
 
-  // CHECK FOR SYNC FLAG
+  // CHECK FOR SYNC FLAG FIRST
   if (LittleFS.exists("/do_sync")) {
-    performSync(); // This function connects, uploads, deletes flag, and reboots.
-    return; // Never reach the code below
+    performSyncMode();
+    return; // Stop here
   }
 
-  // NORMAL RADAR STARTUP
+  // NORMAL STARTUP
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(marauder_ssid);
-  Serial.print("Marauder Active. IP: "); Serial.println(WiFi.softAPIP());
-  
+  WiFi.softAP("Marauder Hybrid");
+  Serial.print("Radar IP: "); Serial.println(WiFi.softAPIP());
+
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyCallbacks());
   pBLEScan->setActiveScan(true);
 
+  SerialBT.begin("Marauder_Host"); // Classic Init
+
   server.on("/", handleRoot);
-  server.on("/api/scan", [](){ server.send(200, "application/json", jsonDevices); });
+  server.on("/api/scan", [](){ server.send(200, "application/json", finalJson); });
   server.begin();
 }
 
 void loop() {
-  // If we are here, we are in Radar Mode
   server.handleClient();
-  
-  if (millis() - lastScanTime > 5000) {
-    performScan();
-    lastScanTime = millis();
+  unsigned long now = millis();
+
+  // 1. Fast BLE Scan (Every 4s)
+  if (now - lastBleScan > 4000) {
+    scanBLE();
+    updateWebData();
+    lastBleScan = now;
   }
 
-  if (millis() - lastLogTime > 60000) {
-    logToMemory();
-    lastLogTime = millis();
+  // 2. Slow Classic Scan (Every 45s)
+  if (now - lastClassicScan > 45000) {
+    scanClassic(); 
+    updateWebData();
+    lastClassicScan = now;
   }
 
-  // If Button Pressed -> Restart into Sync Mode
+  // 3. Auto-Log to memory (Every 60s)
+  if (now - lastLogTime > 60000) {
+    Serial.println("[LOG] Auto-saving snapshot...");
+    File f = LittleFS.open("/log.txt", "a");
+    String line;
+    JsonDocument wrap;
+    wrap["count"] = bleDoc.size() + classicDoc.size();
+    wrap["data"] = finalJson;
+    serializeJson(wrap, line);
+    f.println(line);
+    f.close();
+    lastLogTime = now;
+  }
+
+  // 4. Button Press -> Sync
   if (digitalRead(0) == LOW) {
     delay(100);
-    if (digitalRead(0) == LOW) triggerSyncRestart();
+    if (digitalRead(0) == LOW) triggerSync();
   }
 }
